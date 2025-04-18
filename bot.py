@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from telegram.ext import Application, CommandHandler, CallbackContext
@@ -31,29 +32,34 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 async def login(update: Update, context: CallbackContext) -> None:
     global client_running
-    phone_number = " ".join(context.args)
+    phone_number = " ".join(context.args).strip()
     if not phone_number:
-        await update.message.reply_text("Please provide your phone number: /login <phone_number>")
+        await update.message.reply_text("Please provide your phone number: /login <phone_number>\nExample: /login +1234567890")
+        return
+    # Validate phone number format
+    if not re.match(r'^\+\d{10,15}$', phone_number):
+        await update.message.reply_text("Invalid phone number format. Use international format: /login +1234567890")
         return
     try:
-        if not client_running:
-            # Start Pyrogram client with the provided phone number
-            await user_client.connect()
-            code = await user_client.send_code(phone_number)
+        # Ensure client is disconnected before attempting new connection
+        if user_client.is_connected:
             await user_client.disconnect()
-            client_running = True
-            await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
-            context.user_data["phone_code_hash"] = code.phone_code_hash
-            context.user_data["phone_number"] = phone_number
-        else:
-            await update.message.reply_text("Client already running. Please verify with /verify <code> or logout first.")
+        await user_client.connect()
+        code = await user_client.send_code(phone_number)
+        client_running = True
+        await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
+        context.user_data["phone_code_hash"] = code.phone_code_hash
+        context.user_data["phone_number"] = phone_number
     except Exception as e:
         logger.error(f"Login error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
+    finally:
+        if user_client.is_connected:
+            await user_client.disconnect()
 
 async def verify(update: Update, context: CallbackContext) -> None:
     global client_running
-    code = " ".join(context.args)
+    code = " ".join(context.args).strip()
     phone_number = context.user_data.get("phone_number")
     phone_code_hash = context.user_data.get("phone_code_hash")
     if not code or not phone_number or not phone_code_hash:
@@ -79,7 +85,7 @@ async def add_task(update: Update, context: CallbackContext) -> None:
         return
     args = context.args
     if len(args) != 3:
-        await update.message.reply_text("Usage: /addtask <source_id> <destination_id> <type>\nTypes: channel_to_channel, bot_to_channel, channel_to_bot, channel_to_user, user_to_bot")
+        await update.message.reply_text("Usage: /addtask <source_id> <destination_id> <type>\nExample: /addtask -100123456789 -100987654321 channel_to_channel\nTypes: channel_to_channel, bot_to_channel, channel_to_bot, channel_to_user, user_to_bot")
         return
     source_id, destination_id, task_type = args
     valid_types = ["channel_to_channel", "bot_to_channel", "channel_to_bot", "channel_to_user", "user_to_bot"]
@@ -108,9 +114,9 @@ async def list_tasks(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"Error: {str(e)}")
 
 async def remove_task(update: Update, context: CallbackContext) -> None:
-    task_id = " ".join(context.args)
+    task_id = " ".join(context.args).strip()
     if not task_id:
-        await update.message.reply_text("Please provide the task ID: /removetask <task_id>")
+        await update.message.reply_text("Please provide the task ID: /removetask <task_id>\nExample: /removetask 507f1f77bcf86cd799439011")
         return
     try:
         result = remove_forwarding_task(task_id, tasks_collection)
@@ -156,7 +162,7 @@ async def main():
             await asyncio.sleep(3600)  # Keep the loop running
     except KeyboardInterrupt:
         global client_running
-        if client_running:
+        if client_running and user_client.is_connected:
             await user_client.stop()
         await application.stop()
         await application.shutdown()
