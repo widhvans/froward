@@ -2,9 +2,10 @@ import logging
 import asyncio
 import re
 import time
-from pyrogram import Client, filters
+from pyrogram import Client, filters as pyro_filters
 from pyrogram.types import Message
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext
+from telegram.ext import filters as ext_filters
 from telegram import Update
 from utils import add_forwarding_task, get_forwarding_tasks, remove_forwarding_task
 from config import TELEGRAM_BOT_TOKEN, API_ID, API_HASH, MONGO_URI
@@ -14,7 +15,7 @@ from pymongo import MongoClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize 🙂MongoDB
+# Initialize MongoDB
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["telegram_bot"]
 tasks_collection = db["forwarding_tasks"]
@@ -248,7 +249,7 @@ async def remove_task(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"Error: {str(e)}")
 
 # Pyrogram message handler for forwarding
-@user_client.on_message(filters.chat([int(task["source_id"]) for task in get_forwarding_tasks(tasks_collection) if task["source_id"].startswith('-')]))
+@user_client.on_message(pyro_filters.chat([int(task["source_id"]) for task in get_forwarding_tasks(tasks_collection) if task["source_id"].startswith('-')]))
 async def forward_message(client: Client, message: Message):
     tasks = get_forwarding_tasks(tasks_collection)
     for task in tasks:
@@ -269,7 +270,7 @@ async def run_bot():
     application.add_handler(CommandHandler("listtasks", list_tasks))
     application.add_handler(CommandHandler("removetask", remove_task))
     # Add message handler for aa<code>
-    application.add_handler(MessageHandler(filters.text & ~filters.command, handle_code_message))
+    application.add_handler(MessageHandler(ext_filters.TEXT & ~ext_filters.COMMAND, handle_code_message))
 
     # Start polling for bot
     await application.initialize()
