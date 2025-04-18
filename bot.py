@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import re
+import time
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from telegram.ext import Application, CommandHandler, CallbackContext
@@ -27,11 +28,15 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 # Flag to track if Pyrogram client is running
 client_running = False
 
+# Cooldown tracking for login/resendcode
+last_code_request = 0
+COOLDOWN_SECONDS = 30
+
 async def start(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text("Welcome! Use /login <phone_number> to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
 
 async def login(update: Update, context: CallbackContext) -> None:
-    global client_running
+    global client_running, last_code_request
     phone_number = " ".join(context.args).strip()
     if not phone_number:
         await update.message.reply_text("Please provide your phone number: /login <phone_number>\nExample: /login +1234567890")
@@ -40,6 +45,11 @@ async def login(update: Update, context: CallbackContext) -> None:
     if not re.match(r'^\+\d{10,15}$', phone_number):
         await update.message.reply_text("Invalid phone number format. Use international format: /login +1234567890")
         return
+    # Check cooldown
+    current_time = time.time()
+    if current_time - last_code_request < COOLDOWN_SECONDS:
+        await update.message.reply_text(f"Please wait {int(COOLDOWN_SECONDS - (current_time - last_code_request))} seconds before requesting a new code.")
+        return
     try:
         # Ensure client is disconnected before attempting new connection
         if user_client.is_connected:
@@ -47,22 +57,31 @@ async def login(update: Update, context: CallbackContext) -> None:
         await user_client.connect()
         code = await user_client.send_code(phone_number)
         client_running = True
-        await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>\nIf the code expires, use /resendcode.")
+        last_code_request = current_time
+        await update.message.reply_text("Verification code sent! Enter it within 2 minutes using: /verify <code>\nCheck your Telegram app or SMS. If the code expires, use /resendcode.")
         context.user_data["phone_code_hash"] = code.phone_code_hash
         context.user_data["phone_number"] = phone_number
-        logger.info(f"Login initiated for phone number (masked): {phone_number[:4]}...")
+        logger.info(f"Login initiated at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
-        logger.error(f"Login error: {e}")
-        await update.message.reply_text(f"Error: {str(e)}")
+        logger.error(f"Login error at {time.ctime()}: {e}")
+        if "429" in str(e):
+            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
+        else:
+            await update.message.reply_text(f"Error: {str(e)}")
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
 
 async def resend_code(update: Update, context: CallbackContext) -> None:
-    global client_running
+    global client_running, last_code_request
     phone_number = context.user_data.get("phone_number")
     if not phone_number:
         await update.message.reply_text("Please login first using /login <phone_number>")
+        return
+    # Check cooldown
+    current_time = time.time()
+    if current_time - last_code_request < COOLDOWN_SECONDS:
+        await update.message.reply_text(f"Please wait {int(COOLDOWN_SECONDS - (current_time - last_code_request))} seconds before requesting a new code.")
         return
     try:
         if user_client.is_connected:
@@ -70,12 +89,16 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
         await user_client.connect()
         code = await user_client.send_code(phone_number)
         client_running = True
-        await update.message.reply_text("New verification code sent. Enter it using: /verify <code>")
+        last_code_request = current_time
+        await update.message.reply_text("New verification code sent! Enter it within 2 minutes using: /verify <code>\nCheck your Telegram app or SMS.")
         context.user_data["phone_code_hash"] = code.phone_code_hash
-        logger.info(f"Resent code for phone number (masked): {phone_number[:4]}...")
+        logger.info(f"Code resent at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
-        logger.error(f"Resend code error: {e}")
-        await update.message.reply_text(f"Error: {str(e)}")
+        logger.error(f"Resend code error at {time.ctime()}: {e}")
+        if "429" in str(e):
+            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
+        else:
+            await update.message.reply_text(f"Error: {str(e)}")
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
@@ -94,12 +117,14 @@ async def verify(update: Update, context: CallbackContext) -> None:
         await user_client.start()  # Start client after successful login
         client_running = True
         await update.message.reply_text("Successfully logged in!")
-        logger.info(f"Verification successful for phone number (masked): {phone_number[:4]}...")
+        logger.info(f"Verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
-        logger.error(f"Verification error: {e}")
+        logger.error(f"Verification error at {time.ctime()}: {e}")
         if "PHONE_CODE_EXPIRED" in str(e):
             await update.message.reply_text("Error: The verification code has expired. Request a new code using /resendcode.")
             client_running = False
+        elif "429" in str(e):
+            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
     finally:
@@ -128,9 +153,9 @@ async def add_task(update: Update, context: CallbackContext) -> None:
     try:
         task_id = add_forwarding_task(source_id, destination_id, task_type, tasks_collection)
         await update.message.reply_text(f"Task added successfully! Task ID: {task_id}")
-        logger.info(f"Task added: {source_id} -> {destination_id}, Type: {task_type}")
+        logger.info(f"Task added at {time.ctime()}: {source_id} -> {destination_id}, Type: {task_type}")
     except Exception as e:
-        logger.error(f"Add task error: {e}")
+        logger.error(f"Add task error at {time.ctime()}: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
 
 async def list_tasks(update: Update, context: CallbackContext) -> None:
@@ -144,7 +169,7 @@ async def list_tasks(update: Update, context: CallbackContext) -> None:
             response += f"ID: {task['_id']}, Source: {task['source_id']}, Destination: {task['destination_id']}, Type: {task['type']}\n"
         await update.message.reply_text(response)
     except Exception as e:
-        logger.error(f"List tasks error: {e}")
+        logger.error(f"List tasks error at {time.ctime()}: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
 
 async def remove_task(update: Update, context: CallbackContext) -> None:
@@ -157,10 +182,10 @@ async def remove_task(update: Update, context: CallbackContext) -> None:
         if result:
             await update.message.reply_text(f"Task {task_id} removed successfully!")
         else:
-            await update.message.reply_text(f"Task {task_id} not detected.")
-        logger.info(f"Task removal attempted for ID: {task_id}, Success: {result}")
+            await update.message.reply_text(f"Task {task_id} not found.")
+        logger.info(f"Task removal attempted at {time.ctime()}: ID: {task_id}, Success: {result}")
     except Exception as e:
-        logger.error(f"Remove task error: {e}")
+        logger.error(f"Remove task error at {time.ctime()}: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
 
 # Pyrogram message handler for forwarding
@@ -171,9 +196,9 @@ async def forward_message(client: Client, message: Message):
         if int(task["source_id"]) == message.chat.id:
             try:
                 await message.forward(int(task["destination_id"]))
-                logger.info(f"Forwarded message from {task['source_id']} to {task['destination_id']}")
+                logger.info(f"Forwarded message at {time.ctime()}: {task['source_id']} -> {task['destination_id']}")
             except Exception as e:
-                logger.error(f"Forwarding error: {e}")
+                logger.error(f"Forwarding error at {time.ctime()}: {e}")
 
 async def run_bot():
     # Add command handlers
