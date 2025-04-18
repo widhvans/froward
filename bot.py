@@ -17,7 +17,7 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["telegram_bot"]
 tasks_collection = db["forwarding_tasks"]
 
-# Initialize Pyrogram client (without starting it)
+# Initialize Pyrogram client (do not start yet)
 user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH, no_updates=True)
 
 # Bot instance for python-telegram-bot
@@ -27,7 +27,7 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 client_running = False
 
 async def start(update: Update, context: CallbackContext) -> None:
-    await update.message.reply_text("Welcome! Use /login to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
+    await update.message.reply_text("Welcome! Use /login <phone_number> to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
 
 async def login(update: Update, context: CallbackContext) -> None:
     global client_running
@@ -37,17 +37,22 @@ async def login(update: Update, context: CallbackContext) -> None:
         return
     try:
         if not client_running:
-            await user_client.start()
+            # Start Pyrogram client with the provided phone number
+            await user_client.connect()
+            code = await user_client.send_code(phone_number)
+            await user_client.disconnect()
             client_running = True
-        code = await user_client.send_code(phone_number)
-        await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
-        context.user_data["phone_code_hash"] = code.phone_code_hash
-        context.user_data["phone_number"] = phone_number
+            await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
+            context.user_data["phone_code_hash"] = code.phone_code_hash
+            context.user_data["phone_number"] = phone_number
+        else:
+            await update.message.reply_text("Client already running. Please verify with /verify <code> or logout first.")
     except Exception as e:
         logger.error(f"Login error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
 
 async def verify(update: Update, context: CallbackContext) -> None:
+    global client_running
     code = " ".join(context.args)
     phone_number = context.user_data.get("phone_number")
     phone_code_hash = context.user_data.get("phone_code_hash")
@@ -55,13 +60,23 @@ async def verify(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("Please login first using /login <phone_number>")
         return
     try:
+        await user_client.connect()
         await user_client.sign_in(phone_number, phone_code_hash, code)
+        await user_client.start()  # Start client after successful login
+        client_running = True
         await update.message.reply_text("Successfully logged in!")
     except Exception as e:
         logger.error(f"Verification error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
+    finally:
+        if user_client.is_connected:
+            await user_client.disconnect()
 
 async def add_task(update: Update, context: CallbackContext) -> None:
+    global client_running
+    if not client_running:
+        await update.message.reply_text("Please login first using /login <phone_number> and /verify <code>")
+        return
     args = context.args
     if len(args) != 3:
         await update.message.reply_text("Usage: /addtask <source_id> <destination_id> <type>\nTypes: channel_to_channel, bot_to_channel, channel_to_bot, channel_to_user, user_to_bot")
