@@ -90,7 +90,6 @@ async def auto_verify(phone_number: str, phone_code_hash: str, update: Update) -
         timeout = 120  # 2 minutes
         start_time = time.time()
         while time.time() - start_time < timeout and auto_verify_running:
-            # Check for new messages (Pyrogram handles this internally)
             await asyncio.sleep(5)  # Poll every 5 seconds
         if not auto_verify_running:
             return
@@ -109,7 +108,7 @@ async def auto_verify(phone_number: str, phone_code_hash: str, update: Update) -
             await user_client.disconnect()
 
 # Message handler to capture verification code
-@user_client.on_message(filters.service & filters.from_user("Telegram"))
+@user_client.on_message(filters.user(777000))  # Telegram's official account ID
 async def capture_code(client: Client, message: Message):
     global client_running, auto_verify_running
     if not auto_verify_running:
@@ -132,7 +131,7 @@ async def capture_code(client: Client, message: Message):
             logger.info(f"Auto-verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
             # Notify user via Telegram bot
             await application.bot.send_message(
-                chat_id=message.chat.id,
+                chat_id=update.message.chat_id,
                 text="Successfully logged in via auto-verification!"
             )
     except Exception as e:
@@ -180,7 +179,7 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
         auto_verify_running = False
     finally:
         if user_client.is_connected:
-            await user_client.disconnect()
+            user_client.disconnect()
 
 async def verify(update: Update, context: CallbackContext) -> None:
     global client_running, auto_verify_running
