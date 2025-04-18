@@ -19,8 +19,8 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["telegram_bot"]
 tasks_collection = db["forwarding_tasks"]
 
-# Initialize Pyrogram client (do not start yet)
-user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH, no_updates=True)
+# Initialize Pyrogram client
+user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH, no_updates=False)
 
 # Bot instance for python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -32,11 +32,14 @@ client_running = False
 last_code_request = 0
 COOLDOWN_SECONDS = 30
 
+# Flag to track auto-verification
+auto_verify_running = False
+
 async def start(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text("Welcome! Use /login <phone_number> to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
 
 async def login(update: Update, context: CallbackContext) -> None:
-    global client_running, last_code_request
+    global client_running, last_code_request, auto_verify_running
     phone_number = " ".join(context.args).strip()
     if not phone_number:
         await update.message.reply_text("Please provide your phone number: /login <phone_number>\nExample: /login +1234567890")
@@ -51,29 +54,98 @@ async def login(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"Please wait {int(COOLDOWN_SECONDS - (current_time - last_code_request))} seconds before requesting a new code.")
         return
     try:
-        # Ensure client is disconnected before attempting new connection
+        # Ensure client is disconnected
         if user_client.is_connected:
             await user_client.disconnect()
         await user_client.connect()
         code = await user_client.send_code(phone_number)
         client_running = True
+        auto_verify_running = True
         last_code_request = current_time
-        await update.message.reply_text("Verification code sent! Enter it within 2 minutes using: /verify <code>\nCheck your Telegram app or SMS. If the code expires, use /resendcode.")
         context.user_data["phone_code_hash"] = code.phone_code_hash
         context.user_data["phone_number"] = phone_number
+        await update.message.reply_text(
+            "Verification code sent! Waiting for code in Telegram messages (auto-verification).\n"
+            "If not received or sent via SMS, enter manually within 2 minutes: /verify <code>\n"
+            "If the code expires, use /resendcode."
+        )
         logger.info(f"Login initiated at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
+        # Start auto-verification in the background
+        asyncio.create_task(auto_verify(phone_number, code.phone_code_hash, update))
     except Exception as e:
         logger.error(f"Login error at {time.ctime()}: {e}")
         if "429" in str(e):
             await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
+        auto_verify_running = False
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
 
+async def auto_verify(phone_number: str, phone_code_hash: str, update: Update) -> None:
+    global client_running, auto_verify_running
+    try:
+        # Wait for up to 2 minutes for the code
+        timeout = 120  # 2 minutes
+        start_time = time.time()
+        while time.time() - start_time < timeout and auto_verify_running:
+            # Check for new messages (Pyrogram handles this internally)
+            await asyncio.sleep(5)  # Poll every 5 seconds
+        if not auto_verify_running:
+            return
+        # If no code was found, inform the user
+        await update.message.reply_text(
+            "Auto-verification timed out. Please enter the code manually: /verify <code>\n"
+            "If you didn't receive it, use /resendcode."
+        )
+        logger.info(f"Auto-verification timed out at {time.ctime()} for phone number (masked): {phone_number[:4]}...")
+    except Exception as e:
+        logger.error(f"Auto-verification error at {time.ctime()}: {e}")
+        await update.message.reply_text(f"Auto-verification failed: {str(e)}. Please use /verify <code> or /resendcode.")
+    finally:
+        auto_verify_running = False
+        if user_client.is_connected:
+            await user_client.disconnect()
+
+# Message handler to capture verification code
+@user_client.on_message(filters.service & filters.from_user("Telegram"))
+async def capture_code(client: Client, message: Message):
+    global client_running, auto_verify_running
+    if not auto_verify_running:
+        return
+    try:
+        # Extract 5-digit code from message
+        code_match = re.search(r'\b(\d{5})\b', message.text)
+        if code_match:
+            code = code_match.group(1)
+            phone_number = client.session.get("phone_number")
+            phone_code_hash = client.session.get("phone_code_hash")
+            if not phone_number or not phone_code_hash:
+                logger.error(f"Auto-verification failed at {time.ctime()}: Missing phone number or code hash")
+                return
+            await client.connect()
+            await client.sign_in(phone_number, phone_code_hash, code)
+            await client.start()
+            client_running = True
+            auto_verify_running = False
+            logger.info(f"Auto-verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
+            # Notify user via Telegram bot
+            await application.bot.send_message(
+                chat_id=message.chat.id,
+                text="Successfully logged in via auto-verification!"
+            )
+    except Exception as e:
+        logger.error(f"Auto-verification error at {time.ctime()}: {e}")
+        if "PHONE_CODE_EXPIRED" in str(e):
+            logger.info(f"Auto-verification code expired at {time.ctime()}")
+        auto_verify_running = False
+    finally:
+        if client.is_connected:
+            await client.disconnect()
+
 async def resend_code(update: Update, context: CallbackContext) -> None:
-    global client_running, last_code_request
+    global client_running, last_code_request, auto_verify_running
     phone_number = context.user_data.get("phone_number")
     if not phone_number:
         await update.message.reply_text("Please login first using /login <phone_number>")
@@ -89,22 +161,29 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
         await user_client.connect()
         code = await user_client.send_code(phone_number)
         client_running = True
+        auto_verify_running = True
         last_code_request = current_time
-        await update.message.reply_text("New verification code sent! Enter it within 2 minutes using: /verify <code>\nCheck your Telegram app or SMS.")
         context.user_data["phone_code_hash"] = code.phone_code_hash
+        await update.message.reply_text(
+            "New verification code sent! Waiting for code in Telegram messages (auto-verification).\n"
+            "If not received or sent via SMS, enter manually within 2 minutes: /verify <code>"
+        )
         logger.info(f"Code resent at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
+        # Start auto-verification
+        asyncio.create_task(auto_verify(phone_number, code.phone_code_hash, update))
     except Exception as e:
         logger.error(f"Resend code error at {time.ctime()}: {e}")
         if "429" in str(e):
             await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
+        auto_verify_running = False
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
 
 async def verify(update: Update, context: CallbackContext) -> None:
-    global client_running
+    global client_running, auto_verify_running
     code = " ".join(context.args).strip()
     phone_number = context.user_data.get("phone_number")
     phone_code_hash = context.user_data.get("phone_code_hash")
@@ -114,10 +193,11 @@ async def verify(update: Update, context: CallbackContext) -> None:
     try:
         await user_client.connect()
         await user_client.sign_in(phone_number, phone_code_hash, code)
-        await user_client.start()  # Start client after successful login
+        await user_client.start()
         client_running = True
+        auto_verify_running = False
         await update.message.reply_text("Successfully logged in!")
-        logger.info(f"Verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
+        logger.info(f"Manual verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Verification error at {time.ctime()}: {e}")
         if "PHONE_CODE_EXPIRED" in str(e):
