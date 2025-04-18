@@ -106,7 +106,9 @@ async def verify(update: Update, context: CallbackContext) -> None:
         if user_client.is_connected:
             await user_client.disconnect()
 
-async def add_task(update: Update, context: CallbackTrack if not client_running:
+async def add_task(update: Update, context: CallbackContext) -> None:
+    global client_running
+    if not client_running:
         await update.message.reply_text("Please login first using /login <phone_number> and /verify <code>")
         return
     args = context.args
@@ -155,7 +157,7 @@ async def remove_task(update: Update, context: CallbackContext) -> None:
         if result:
             await update.message.reply_text(f"Task {task_id} removed successfully!")
         else:
-            await update.message.reply_text(f"Task {task_id} not found.")
+            await update.message.reply_text(f"Task {task_id} not detected.")
         logger.info(f"Task removal attempted for ID: {task_id}, Success: {result}")
     except Exception as e:
         logger.error(f"Remove task error: {e}")
