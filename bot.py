@@ -17,22 +17,28 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["telegram_bot"]
 tasks_collection = db["forwarding_tasks"]
 
-# Initialize Pyrogram client
-user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH)
+# Initialize Pyrogram client (without starting it)
+user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH, no_updates=True)
 
 # Bot instance for python-telegram-bot
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+# Flag to track if Pyrogram client is running
+client_running = False
 
 async def start(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text("Welcome! Use /login to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
 
 async def login(update: Update, context: CallbackContext) -> None:
+    global client_running
     phone_number = " ".join(context.args)
     if not phone_number:
         await update.message.reply_text("Please provide your phone number: /login <phone_number>")
         return
     try:
-        await user_client.start()
+        if not client_running:
+            await user_client.start()
+            client_running = True
         code = await user_client.send_code(phone_number)
         await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
         context.user_data["phone_code_hash"] = code.phone_code_hash
@@ -113,7 +119,7 @@ async def forward_message(client: Client, message: Message):
             except Exception as e:
                 logger.error(f"Forwarding error: {e}")
 
-def main():
+async def run_bot():
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("login", login))
@@ -122,12 +128,23 @@ def main():
     application.add_handler(CommandHandler("listtasks", list_tasks))
     application.add_handler(CommandHandler("removetask", remove_task))
 
-    # Start Pyrogram client
-    loop = asyncio.get_event_loop()
-    loop.create_task(user_client.start())
-
     # Start polling for bot
-    application.run_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+async def main():
+    # Run the bot and keep the event loop alive
+    await run_bot()
+    try:
+        while True:
+            await asyncio.sleep(3600)  # Keep the loop running
+    except KeyboardInterrupt:
+        global client_running
+        if client_running:
+            await user_client.stop()
+        await application.stop()
+        await application.shutdown()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
