@@ -2,9 +2,10 @@ import logging
 import asyncio
 import re
 import time
+import os
 from pyrogram import Client, filters as pyro_filters
 from pyrogram.types import Message
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, CallbackContext
 from telegram.ext import filters as ext_filters
 from telegram import Update
 from utils import add_forwarding_task, get_forwarding_tasks, remove_forwarding_task
@@ -31,7 +32,7 @@ client_running = False
 
 # Cooldown tracking for login/resendcode
 last_code_request = 0
-COOLDOWN_SECONDS = 30
+COOLDOWN_SECONDS = 60  # Increased to 60 seconds
 
 async def start(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text("Welcome! Use /login <phone_number> to authenticate, /addtask to set forwarding, /listtasks to view tasks, or /removetask to delete a task.")
@@ -52,6 +53,11 @@ async def login(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"Please wait {int(COOLDOWN_SECONDS - (current_time - last_code_request))} seconds before requesting a new code.")
         return
     try:
+        # Reset session file
+        session_file = "user_session.session"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            logger.info(f"Deleted session file at {time.ctime()}")
         # Ensure client is disconnected
         if user_client.is_connected:
             await user_client.disconnect()
@@ -64,35 +70,37 @@ async def login(update: Update, context: CallbackContext) -> None:
         context.user_data["chat_id"] = update.message.chat_id
         await update.message.reply_text(
             f"Trying to connect to your account...\n"
-            f"We sent a login code to your Telegram account. Enter the code in the format:\n"
-            f"aa<code> (e.g., aa12345 if 12345 is the login code).\n"
-            f"Alternatively, use /verify <code> or /resendcode if needed."
+            f"We sent a login code to your Telegram account. Enter the code using:\n"
+            f"/code aa<code> (e.g., /code aa12345 if 12345 is the login code).\n"
+            f"Enter within 2 minutes. Use /resendcode if needed."
         )
         logger.info(f"Login initiated at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Login error at {time.ctime()}: {e}")
         if "429" in str(e):
-            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
+            await update.message.reply_text("Error: Too many login attempts. Please wait 5-10 minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
 
-async def handle_code_message(update: Update, context: CallbackContext) -> None:
+async def code(update: Update, context: CallbackContext) -> None:
     global client_running
-    message_text = update.message.text.strip()
+    code_input = " ".join(context.args).strip()
     phone_number = context.user_data.get("phone_number")
     phone_code_hash = context.user_data.get("phone_code_hash")
     chat_id = context.user_data.get("chat_id")
-    if not message_text or not phone_number or not phone_code_hash or not chat_id:
-        return  # Ignore if not in login process
-    # Check for aa<code> format
-    if not message_text.startswith("aa"):
-        return  # Ignore non-aa messages
-    code = message_text[2:]  # Strip "aa"
+    if not code_input or not phone_number or not phone_code_hash or not chat_id:
+        await update.message.reply_text("Please login first using /login <phone_number>")
+        return
+    # Extract code after "aa" prefix
+    if not code_input.startswith("aa"):
+        await update.message.reply_text("Invalid format. Use: /code aa<code> (e.g., /code aa12345)")
+        return
+    code = code_input[2:]  # Strip "aa"
     if not re.match(r'^\d{5}$', code):
-        await update.message.reply_text("Invalid code. It must be a 5-digit number (e.g., aa12345)")
+        await update.message.reply_text("Invalid code. It must be a 5-digit number (e.g., /code aa12345)")
         return
     try:
         await user_client.connect()
@@ -105,50 +113,14 @@ async def handle_code_message(update: Update, context: CallbackContext) -> None:
                  "Send /addtask to set up forwarding.\n"
                  "Check /listtasks to view tasks or /removetask to delete tasks."
         )
-        logger.info(f"Verification via aa<code> successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
+        logger.info(f"Verification via /code successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Verification error at {time.ctime()}: {e}")
         if "PHONE_CODE_EXPIRED" in str(e):
             await update.message.reply_text("Error: The verification code has expired. Request a new code using /resendcode.")
             client_running = False
         elif "429" in str(e):
-            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
-        else:
-            await update.message.reply_text(f"Error: {str(e)}")
-    finally:
-        if user_client.is_connected:
-            await user_client.disconnect()
-
-async def verify(update: Update, context: CallbackContext) -> None:
-    global client_running
-    code = " ".join(context.args).strip()
-    phone_number = context.user_data.get("phone_number")
-    phone_code_hash = context.user_data.get("phone_code_hash")
-    chat_id = context.user_data.get("chat_id")
-    if not code or not phone_number or not phone_code_hash or not chat_id:
-        await update.message.reply_text("Please login first using /login <phone_number>")
-        return
-    if not re.match(r'^\d{5}$', code):
-        await update.message.reply_text("Invalid code. It must be a 5-digit number (e.g., /verify 12345)")
-        return
-    try:
-        await user_client.connect()
-        await user_client.sign_in(phone_number, phone_code_hash, code)
-        await user_client.start()
-        client_running = True
-        await update.message.reply_text(
-            "Successfully connected to your account!\n"
-            "Send /addtask to set up forwarding.\n"
-            "Check /listtasks to view tasks or /removetask to delete tasks."
-        )
-        logger.info(f"Manual verification successful at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
-    except Exception as e:
-        logger.error(f"Verification error at {time.ctime()}: {e}")
-        if "PHONE_CODE_EXPIRED" in str(e):
-            await update.message.reply_text("Error: The verification code has expired. Request a new code using /resendcode.")
-            client_running = False
-        elif "429" in str(e):
-            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
+            await update.message.reply_text("Error: Too many login attempts. Please wait 5-10 minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
     finally:
@@ -168,6 +140,11 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"Please wait {int(COOLDOWN_SECONDS - (current_time - last_code_request))} seconds before requesting a new code.")
         return
     try:
+        # Reset session file
+        session_file = "user_session.session"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            logger.info(f"Deleted session file at {time.ctime()}")
         if user_client.is_connected:
             await user_client.disconnect()
         await user_client.connect()
@@ -177,14 +154,14 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
         context.user_data["phone_code_hash"] = code.phone_code_hash
         await update.message.reply_text(
             f"New verification code sent!\n"
-            f"Enter the code in the format: aa<code> (e.g., aa12345 if 12345 is the login code).\n"
-            f"Alternatively, use /verify <code>."
+            f"Enter the code using: /code aa<code> (e.g., /code aa12345 if 12345 is the login code).\n"
+            f"Enter within 2 minutes."
         )
         logger.info(f"Code resent at {time.ctime()}: phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Resend code error at {time.ctime()}: {e}")
         if "429" in str(e):
-            await update.message.reply_text("Error: Too many login attempts. Please wait a few minutes and try again.")
+            await update.message.reply_text("Error: Too many login attempts. Please wait 5-10 minutes and try again.")
         else:
             await update.message.reply_text(f"Error: {str(e)}")
     finally:
@@ -194,7 +171,7 @@ async def resend_code(update: Update, context: CallbackContext) -> None:
 async def add_task(update: Update, context: CallbackContext) -> None:
     global client_running
     if not client_running:
-        await update.message.reply_text("Please login first using /login <phone_number> and verify with aa<code> or /verify")
+        await update.message.reply_text("Please login first using /login <phone_number> and verify with /code aa<code>")
         return
     args = context.args
     if len(args) != 3:
@@ -264,13 +241,11 @@ async def run_bot():
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("login", login))
-    application.add_handler(CommandHandler("verify", verify))
+    application.add_handler(CommandHandler("code", code))
     application.add_handler(CommandHandler("resendcode", resend_code))
     application.add_handler(CommandHandler("addtask", add_task))
     application.add_handler(CommandHandler("listtasks", list_tasks))
     application.add_handler(CommandHandler("removetask", remove_task))
-    # Add message handler for aa<code>
-    application.add_handler(MessageHandler(ext_filters.TEXT & ~ext_filters.COMMAND, handle_code_message))
 
     # Start polling for bot
     await application.initialize()
