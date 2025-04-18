@@ -47,11 +47,34 @@ async def login(update: Update, context: CallbackContext) -> None:
         await user_client.connect()
         code = await user_client.send_code(phone_number)
         client_running = True
-        await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>")
+        await update.message.reply_text("Enter the verification code sent to your phone: /verify <code>\nIf the code expires, use /resendcode.")
         context.user_data["phone_code_hash"] = code.phone_code_hash
         context.user_data["phone_number"] = phone_number
+        logger.info(f"Login initiated for phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Login error: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+    finally:
+        if user_client.is_connected:
+            await user_client.disconnect()
+
+async def resend_code(update: Update, context: CallbackContext) -> None:
+    global client_running
+    phone_number = context.user_data.get("phone_number")
+    if not phone_number:
+        await update.message.reply_text("Please login first using /login <phone_number>")
+        return
+    try:
+        if user_client.is_connected:
+            await user_client.disconnect()
+        await user_client.connect()
+        code = await user_client.send_code(phone_number)
+        client_running = True
+        await update.message.reply_text("New verification code sent. Enter it using: /verify <code>")
+        context.user_data["phone_code_hash"] = code.phone_code_hash
+        logger.info(f"Resent code for phone number (masked): {phone_number[:4]}...")
+    except Exception as e:
+        logger.error(f"Resend code error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
     finally:
         if user_client.is_connected:
@@ -71,16 +94,19 @@ async def verify(update: Update, context: CallbackContext) -> None:
         await user_client.start()  # Start client after successful login
         client_running = True
         await update.message.reply_text("Successfully logged in!")
+        logger.info(f"Verification successful for phone number (masked): {phone_number[:4]}...")
     except Exception as e:
         logger.error(f"Verification error: {e}")
-        await update.message.reply_text(f"Error: {str(e)}")
+        if "PHONE_CODE_EXPIRED" in str(e):
+            await update.message.reply_text("Error: The verification code has expired. Request a new code using /resendcode.")
+            client_running = False
+        else:
+            await update.message.reply_text(f"Error: {str(e)}")
     finally:
         if user_client.is_connected:
             await user_client.disconnect()
 
-async def add_task(update: Update, context: CallbackContext) -> None:
-    global client_running
-    if not client_running:
+async def add_task(update: Update, context: CallbackTrack if not client_running:
         await update.message.reply_text("Please login first using /login <phone_number> and /verify <code>")
         return
     args = context.args
@@ -92,9 +118,15 @@ async def add_task(update: Update, context: CallbackContext) -> None:
     if task_type not in valid_types:
         await update.message.reply_text(f"Invalid type. Use one of: {', '.join(valid_types)}")
         return
+    # Validate chat IDs
+    if not (source_id.startswith('-') or source_id.startswith('@') or source_id.isdigit()) or \
+       not (destination_id.startswith('-') or destination_id.startswith('@') or destination_id.isdigit()):
+        await update.message.reply_text("Invalid chat ID format. Use channel IDs (e.g., -100123456789), usernames (e.g., @username), or user IDs.")
+        return
     try:
         task_id = add_forwarding_task(source_id, destination_id, task_type, tasks_collection)
         await update.message.reply_text(f"Task added successfully! Task ID: {task_id}")
+        logger.info(f"Task added: {source_id} -> {destination_id}, Type: {task_type}")
     except Exception as e:
         logger.error(f"Add task error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
@@ -124,12 +156,13 @@ async def remove_task(update: Update, context: CallbackContext) -> None:
             await update.message.reply_text(f"Task {task_id} removed successfully!")
         else:
             await update.message.reply_text(f"Task {task_id} not found.")
+        logger.info(f"Task removal attempted for ID: {task_id}, Success: {result}")
     except Exception as e:
         logger.error(f"Remove task error: {e}")
         await update.message.reply_text(f"Error: {str(e)}")
 
 # Pyrogram message handler for forwarding
-@user_client.on_message(filters.chat([int(task["source_id"]) for task in get_forwarding_tasks(tasks_collection)]))
+@user_client.on_message(filters.chat([int(task["source_id"]) for task in get_forwarding_tasks(tasks_collection) if task["source_id"].startswith('-')]))
 async def forward_message(client: Client, message: Message):
     tasks = get_forwarding_tasks(tasks_collection)
     for task in tasks:
@@ -144,6 +177,7 @@ async def run_bot():
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("login", login))
+    application.add_handler(CommandHandler("resendcode", resend_code))
     application.add_handler(CommandHandler("verify", verify))
     application.add_handler(CommandHandler("addtask", add_task))
     application.add_handler(CommandHandler("listtasks", list_tasks))
